@@ -82,6 +82,13 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
                 if ui.input(|i| i.pointer.any_released())
                     && let Some(p) = ui.ctx().pointer_latest_pos()
                     && let Some((target, _)) = drop_targets.iter().find(|(_, rect)| rect.contains(p))
+                    && let Some(payload) = egui::DragAndDrop::take_payload::<crate::browser::PluginDrag>(ui.ctx())
+                {
+                    crate::browser::insert_on_track(app, *target, &payload, None);
+                }
+                if ui.input(|i| i.pointer.any_released())
+                    && let Some(p) = ui.ctx().pointer_latest_pos()
+                    && let Some((target, _)) = drop_targets.iter().find(|(_, rect)| rect.contains(p))
                     && let Some(payload) = egui::DragAndDrop::take_payload::<TrackDrag>(ui.ctx())
                 {
                     let folder = app.engine.session().track(*target).and_then(|t| {
@@ -517,6 +524,9 @@ fn insert_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: usize, r: R
     if let Some(payload) = resp.dnd_release_payload::<InsertDrag>() {
         copy_drop(app, *payload, id, Some(slot));
     }
+    if let Some(payload) = resp.dnd_release_payload::<crate::browser::PluginDrag>() {
+        crate::browser::insert_on_track(app, id, &payload, Some(slot));
+    }
     let fill = match &ins {
         Some(i) if i.bypass => t.insert_bypass,
         Some(_) => t.insert_on,
@@ -553,7 +563,8 @@ pub fn plugin_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize, oc
         }
         ui.separator();
     }
-    let mut cats: Vec<soundcraft_dsp::Category> = Vec::new();
+    // Search built-in and hosted plugins together, grouped by category.
+    /* BROWSER_PICKER_START */
     for p in soundcraft_dsp::plugins() {
         if !p.is_instrument && !cats.contains(&p.category) {
             cats.push(p.category);
@@ -568,11 +579,7 @@ pub fn plugin_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize, oc
             }
         });
     }
-    if let Some(plugin) = hosted_menus(ui, false)
-        && let Err(e) = app.run("mix.insert", json!({"track": id.0, "slot": slot, "plugin": plugin}))
-    {
-        app.ui.status = e;
-    }
+    /* BROWSER_PICKER_END */
 }
 
 /// The instrument picker of an instrument track: its instrument's editor, then the built-in,
