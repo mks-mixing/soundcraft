@@ -105,6 +105,8 @@ pub fn specs() -> Vec<CommandSpec> {
             insert_params
         ),
         cmd!("mix.insert_move", "Move Insert", [], None, "{track?, from, to}", has_selection, insert_move),
+        cmd!("mix.insert_copy", "Copy Insert", [], None, "{from_track, from_slot, to_track, to_slot?}", has_tracks, insert_copy),
+        cmd!("mix.insert_chain_copy", "Copy Insert Chain", [], None, "{from_track, to_track}", has_tracks, insert_chain_copy),
         cmd!("mix.send", "Assign Send", [], None, "{track?, slot?: 0..9|a..j, bus: name, level_db?: 0, pre_fader?: false}", has_selection, send),
         cmd!("mix.send_remove", "Remove Send", [], None, "{track?, slot}", has_selection, |e, p| {
             let (t, slot) = track_slot(e, p, "mix.send_remove", SEND_SLOTS)?;
@@ -386,6 +388,36 @@ fn insert_move(e: &mut Engine, p: &Value) -> Result<Value> {
     Ok(json!({}))
 }
 
+fn insert_copy(e: &mut Engine, p: &Value) -> Result<Value> {
+    let from = track_param(e, "mix.insert_copy", p, "from_track")?.ok_or_else(|| bad("mix.insert_copy", "`from_track` required"))?;
+    let to = track_param(e, "mix.insert_copy", p, "to_track")?.ok_or_else(|| bad("mix.insert_copy", "`to_track` required"))?;
+    let slot = slot_of(p, "from_slot", INSERT_SLOTS).ok_or_else(|| bad("mix.insert_copy", "`from_slot` required"))?;
+    let ins = e.session().track(from).and_then(|t| t.mixer.inserts.get(slot)).and_then(Option::as_ref)
+        .cloned().ok_or_else(|| bad("mix.insert_copy", "source insert is empty"))?;
+    let target = e.session_mut().track_mut(to).ok_or_else(|| bad("mix.insert_copy", "destination track not found"))?;
+    let dest_slot = if p.get("to_slot").is_some() {
+        slot_of(p, "to_slot", INSERT_SLOTS).ok_or_else(|| bad("mix.insert_copy", "invalid `to_slot`"))?
+    } else {
+        target.mixer.inserts.iter().position(Option::is_none).ok_or_else(|| bad("mix.insert_copy", "destination inserts full"))?
+    };
+    if from == to && slot == dest_slot {
+        return Ok(json!({"track": to, "slot": dest_slot}));
+    }
+    if let Some(dest) = target.mixer.inserts.get_mut(dest_slot) {
+        *dest = Some(ins);
+    }
+    Ok(json!({"track": to, "slot": dest_slot}))
+}
+
+fn insert_chain_copy(e: &mut Engine, p: &Value) -> Result<Value> {
+    let from = track_param(e, "mix.insert_chain_copy", p, "from_track")?.ok_or_else(|| bad("mix.insert_chain_copy", "`from_track` required"))?;
+    let to = track_param(e, "mix.insert_chain_copy", p, "to_track")?.ok_or_else(|| bad("mix.insert_chain_copy", "`to_track` required"))?;
+    let chain = e.session().track(from).map(|t| t.mixer.inserts.clone()).ok_or_else(|| bad("mix.insert_chain_copy", "source track not found"))?;
+    let dest = e.session_mut().track_mut(to).ok_or_else(|| bad("mix.insert_chain_copy", "destination track not found"))?;
+    dest.mixer.inserts = chain;
+    Ok(json!({"track": to, "copied": dest.mixer.inserts.iter().flatten().count()}))
+}
+
 fn send(e: &mut Engine, p: &Value) -> Result<Value> {
     let bus = str_param(p, "bus").ok_or_else(|| bad("mix.send", "`bus` required"))?.to_string();
     let t = tracks_required(e, "mix.send", p)?.first().copied().ok_or_else(|| bad("mix.send", "no track"))?;
@@ -605,4 +637,40 @@ fn copy_to_send(e: &mut Engine, p: &Value) -> Result<Value> {
         }
     }
     Ok(json!({}))
+}
+
+#[cfg(test)]
+mod insert_copy_tests {
+    use super::*;
+
+    #[test]
+    fn one_insert_and_chain_copy_keep_parameters_bypass_and_state() {
+        let mut e = crate::demo::demo_engine();
+        let src = e.session().track_by_name("Kick").map(|t| t.id).unwrap();
+        let dst = e.session().track_by_name("Snare").map(|t| t.id).unwrap();
+        let mut ins = Insert::new("eq_7band");
+        ins.params.insert("gain".to_string(), 4.5);
+        ins.bypass = true;
+        ins.preset = "Custom".to_string();
+        ins.set_state_bytes(&[1, 2, 3, 4, 5]);
+        e.session_mut().track_mut(src).unwrap().mixer.inserts[0] = Some(ins.clone());
+        e.session_mut().track_mut(dst).unwrap().mixer.inserts[3] = None;
+        e.execute("mix.insert_copy", &json!({"from_track": src.0, "from_slot": 0, "to_track": dst.0, "to_slot": 3})).unwrap();
+        assert_eq!(e.session().track(dst).unwrap().mixer.inserts[3], Some(ins.clone()));
+
+        e.execute("mix.insert_chain_copy", &json!({"from_track": src.0, "to_track": dst.0})).unwrap();
+        assert_eq!(e.session().track(dst).unwrap().mixer.inserts, e.session().track(src).unwrap().mixer.inserts);
+        assert_eq!(e.session().track(dst).unwrap().mixer.inserts[0], Some(ins));
+    }
+
+    #[test]
+    fn empty_and_missing_insert_copy_fail_without_mutating_destination() {
+        let mut e = crate::demo::demo_engine();
+        let src = e.session().track_by_name("Kick").map(|t| t.id).unwrap();
+        let dst = e.session().track_by_name("Bass").map(|t| t.id).unwrap();
+        e.session_mut().track_mut(src).unwrap().mixer.inserts[7] = None;
+        let before = e.session().track(dst).unwrap().mixer.inserts.clone();
+        assert!(e.execute("mix.insert_copy", &json!({"from_track": src.0, "from_slot": 7, "to_track": dst.0})).is_err());
+        assert_eq!(e.session().track(dst).unwrap().mixer.inserts, before);
+    }
 }
