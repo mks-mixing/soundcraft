@@ -4,6 +4,7 @@
 //! executing commands. It can be replaced without touching anything below it.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+pub mod browser;
 pub mod control;
 pub mod credits;
 pub mod dialogs;
@@ -50,6 +51,11 @@ pub struct UiState {
     pub window: MainWindow,
     pub show_tracks_list: bool,
     pub show_clip_list: bool,
+    pub show_browser: bool,
+    pub browser_instruments: bool,
+    pub browser_sort: String,
+    pub browser_search: String,
+    pub browser_favorites: Vec<String>,
     pub show_transport: bool,
     pub show_memory_locations: bool,
     pub show_big_counter: bool,
@@ -105,6 +111,11 @@ impl Default for UiState {
             window: MainWindow::Edit,
             show_tracks_list: true,
             show_clip_list: true,
+            show_browser: false,
+            browser_instruments: false,
+            browser_sort: "Folder".into(),
+            browser_search: String::new(),
+            browser_favorites: Vec::new(),
             show_transport: false,
             show_memory_locations: false,
             show_big_counter: false,
@@ -829,6 +840,9 @@ impl SoundApp {
         shortcuts::handle(self, &ctx);
         if !self.native_menu_bar {
             menus::menu_bar(self, ui);
+        }
+        if self.ui.show_browser {
+            egui::Panel::right("plugin_browser").exact_size(295.0).show(ui, |ui| browser::show(self, ui));
         }
         match self.ui.window {
             MainWindow::Edit => edit_window::show(self, ui),
