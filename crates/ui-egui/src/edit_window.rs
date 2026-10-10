@@ -764,7 +764,7 @@ fn track_header(app: &mut SoundApp, ui: &mut Ui, track: &Track, head: Rect, sele
     let x0 = head.min.x + 12.0;
     let h = head.height();
     // Click on header background selects the track.
-    let bg = ui.interact(head, ui.id().with(("hdr", id.0)), Sense::click());
+    let bg = ui.interact(head, ui.id().with(("hdr", id.0)), Sense::click_and_drag());
     if bg.clicked() {
         let add = ui.input(|i| i.modifiers.command || i.modifiers.shift);
         let mut tracks = if add { app.engine.session().edit.selected_tracks.clone() } else { Vec::new() };
