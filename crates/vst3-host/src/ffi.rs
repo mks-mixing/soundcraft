@@ -1839,8 +1839,138 @@ mod window {
     }
 }
 
+/// Windows VST3 editors use a real HWND.  Eframe runs the Win32 message pump,
+/// so the plug-in's child HWND receives its normal mouse/keyboard/window messages.
+#[cfg(target_os = "windows")]
+mod window {
+    use std::ffi::{c_char, c_void};
+    use std::ptr;
+
+    // VST3 SDK's kPlatformTypeHWND is the NUL-terminated string "HWND".
+    pub const PLATFORM_TYPE: Option<*const c_char> = Some(c"HWND".as_ptr());
+
+    type Hwnd = *mut c_void;
+    type Hinstance = *mut c_void;
+
+    const WS_OVERLAPPEDWINDOW: u32 = 0x00CF_0000;
+    const WS_CLIPCHILDREN: u32 = 0x0200_0000;
+    const WS_CLIPSIBLINGS: u32 = 0x0400_0000;
+    const WS_EX_APPWINDOW: u32 = 0x0004_0000;
+    const SW_SHOW: i32 = 5;
+    const SW_RESTORE: i32 = 9;
+    const SWP_NOMOVE: u32 = 0x0002;
+    const SWP_NOZORDER: u32 = 0x0004;
+    const SWP_NOACTIVATE: u32 = 0x0010;
+
+    #[repr(C)]
+    struct WinRect {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn CreateWindowExW(
+            ex_style: u32, class_name: *const u16, window_name: *const u16, style: u32,
+            x: i32, y: i32, width: i32, height: i32, parent: Hwnd,
+            menu: *mut c_void, instance: Hinstance, param: *mut c_void,
+        ) -> Hwnd;
+        fn ShowWindow(window: Hwnd, command: i32) -> i32;
+        fn SetForegroundWindow(window: Hwnd) -> i32;
+        fn IsWindow(window: Hwnd) -> i32;
+        fn IsWindowVisible(window: Hwnd) -> i32;
+        fn DestroyWindow(window: Hwnd) -> i32;
+        fn SetWindowPos(window: Hwnd, after: Hwnd, x: i32, y: i32, width: i32, height: i32, flags: u32) -> i32;
+        fn AdjustWindowRectEx(rect: *mut WinRect, style: u32, has_menu: i32, ex_style: u32) -> i32;
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetModuleHandleW(name: *const u16) -> Hinstance;
+    }
+
+    fn window_size(w: f64, h: f64) -> (i32, i32) {
+        let width = w.clamp(1.0, 16_384.0) as i32;
+        let height = h.clamp(1.0, 16_384.0) as i32;
+        let mut rect = WinRect { left: 0, top: 0, right: width, bottom: height };
+        // SAFETY: writable RECT.  On failure the requested client size is used.
+        if unsafe { AdjustWindowRectEx(&mut rect, WS_OVERLAPPEDWINDOW, 0, WS_EX_APPWINDOW) } != 0 {
+            (rect.right - rect.left, rect.bottom - rect.top)
+        } else {
+            (width, height)
+        }
+    }
+
+    pub fn on_main_thread() -> bool {
+        std::thread::current().name() == Some("main")
+    }
+
+    pub struct HostWindow {
+        hwnd: Hwnd,
+    }
+
+    // SAFETY: this is an opaque HWND, never dereferenced; all Win32 calls are
+    // guarded by on_main_thread, and the editor holds the window until removal.
+    unsafe impl Send for HostWindow {}
+
+    impl HostWindow {
+        pub fn new(title: &str, w: f64, h: f64) -> Result<Self, String> {
+            if !on_main_thread() { return Err("VST3 editors require the main UI thread".into()); }
+            let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
+            let title: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+            let (width, height) = window_size(w, h);
+            // SAFETY: system STATIC window class, valid UTF-16 strings and standard top-level
+            // window flags.  No custom WndProc or unmanaged Rust state.
+            let hwnd = unsafe {
+                CreateWindowExW(
+                    WS_EX_APPWINDOW, class.as_ptr(), title.as_ptr(),
+                    WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+                    160, 160, width, height, ptr::null_mut(), ptr::null_mut(),
+                    GetModuleHandleW(ptr::null()), ptr::null_mut(),
+                )
+            };
+            if hwnd.is_null() { Err(format!("could not create VST3 editor window: {}", std::io::Error::last_os_error())) }
+            else { Ok(Self { hwnd }) }
+        }
+
+        pub fn raw(&self) -> *mut c_void { self.hwnd }
+        pub fn parent(&self) -> *mut c_void { self.hwnd }
+
+        pub fn raise(&self) {
+            if on_main_thread() && unsafe { IsWindow(self.hwnd) } != 0 {
+                // SAFETY: the HWND was created on this thread and remains alive.
+                unsafe {
+                    ShowWindow(self.hwnd, SW_RESTORE);
+                    SetForegroundWindow(self.hwnd);
+                }
+            }
+        }
+
+        pub fn is_visible(&self) -> bool {
+            // SAFETY: IsWindow and IsWindowVisible tolerate destroyed HWNDs.
+            unsafe { IsWindow(self.hwnd) != 0 && IsWindowVisible(self.hwnd) != 0 }
+        }
+
+        pub fn close(self) {
+            if on_main_thread() && unsafe { IsWindow(self.hwnd) } != 0 {
+                // SAFETY: destroyed once on its creating UI thread after view.removed().
+                unsafe { DestroyWindow(self.hwnd) };
+            }
+        }
+    }
+
+    pub fn resize(window: *mut c_void, w: f64, h: f64) {
+        if !on_main_thread() || window.is_null() { return; }
+        if unsafe { IsWindow(window) } == 0 { return; }
+        let (width, height) = window_size(w, h);
+        // SAFETY: live HWND; only size changes, preserving window placement and Z order.
+        unsafe { SetWindowPos(window, ptr::null_mut(), 0, 0, width, height, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE) };
+    }
+}
+
 /// Other platforms: no editor windows yet (opening reports "unsupported").
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod window {
     use std::ffi::{c_char, c_void};
 
