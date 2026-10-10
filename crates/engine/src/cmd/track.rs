@@ -743,6 +743,6 @@ mod tests {
         assert_eq!(bass.mixer.output, folder.mixer.input);
         assert_eq!(folder.mixer.output, Route::Main);
         assert!(e.execute("mix.volume", &json!({"track": fid, "db": -9.0})).is_ok());
-        assert_eq!(e.session().track(folder.id).unwrap().mixer.volume_db, -9.0);
+        assert_eq!(e.session().track(soundcraft_model::TrackId(fid)).unwrap().mixer.volume_db, -9.0);
     }
 }

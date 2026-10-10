@@ -15,6 +15,7 @@ pub const UI_COMMANDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("window.memory_locations", "Memory Locations", "Window > Memory Locations", Some("Cmd+5")),
     ("window.undo_history", "Undo History", "Window > Undo History", None),
     ("window.clip_list", "Clip List", "Window > Clip List", None),
+    ("window.browser", "Browser", "", Some("B")),
     ("window.track_list", "Track List", "View > Other Displays > Track List", None),
     ("window.clip_list_view", "Clip List", "View > Other Displays > Clip List", None),
     ("window.narrow_mix", "Narrow Mix", "View > Narrow Mix", Some("Cmd+Alt+M")),
@@ -432,6 +433,7 @@ pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<
         "window.undo_history" => toggle(&mut app.ui.show_undo_history),
         "window.clip_list" | "window.clip_list_view" => toggle(&mut app.ui.show_clip_list),
         "window.track_list" => toggle(&mut app.ui.show_tracks_list),
+        "window.browser" => toggle(&mut app.ui.show_browser),
         "window.narrow_mix" => toggle(&mut app.ui.narrow_mix),
         "window.session_info" => toggle(&mut app.ui.show_session_info),
         "window.audio_health" => {
