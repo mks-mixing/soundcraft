@@ -101,6 +101,9 @@ fn annotate_bends(s: &mut Session, track: TrackId, hits: &[(i64, u8)]) {
 fn detect_bends(e: &mut Engine, p: &Value) -> Result<Value> {
     let cmd = "audio.detect_bends";
     let (track, range) = source_and_range(e, p, cmd)?;
+    if range.len() <= 0 || range.len() > e.session().sample_rate.samples(600.0) {
+        return Err(bad(cmd, "select up to ten minutes of audio"));
+    }
     let hits = drum_onsets(e.session(), track, range, f32_or(p, "sensitivity", 0.65).clamp(0.0, 1.0));
     annotate_bends(e.session_mut(), track, &hits);
     Ok(json!({"track": track, "markers": hits.len()}))
@@ -127,7 +130,11 @@ fn extract_drums(e: &mut Engine, p: &Value) -> Result<Value> {
         id
     } else {
         let name = s.track(track).map_or("Drums".to_string(), |t| format!("{} MIDI", t.name));
-        s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, Some(&name))
+        let id = s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, Some(&name));
+        if let Some(tr) = s.track_mut(id) {
+            tr.instrument = Some(soundcraft_model::Insert::new("drum_synth"));
+        }
+        id
     };
     let pitch = i64_or(p, "pitch", 36).clamp(0, 127) as u8;
     let base = s.tempo.samples_to_ticks(range.start, s.sample_rate);
@@ -175,4 +182,38 @@ mod tests {
             _ => panic!("expected MIDI"),
         }
     }
+    #[test]
+    fn drum_extraction_creates_playable_instrument_with_velocities_and_markers() {
+        let mut e = Engine::default();
+        let sr = 48_000usize;
+        let mut audio = vec![0.0f32; sr * 2];
+        for (at, gain) in [(sr / 3, 0.3f32), (sr, 0.95f32)] {
+            for offset in 0..2000 {
+                let x = offset as f32 / 2000.0;
+                audio[at + offset] = (1.0 - x) * gain * (offset as f32 * 0.17).sin();
+            }
+        }
+        let session = e.session_mut();
+        let src = crate::io::add_source(session, "Drum hits",
+            AudioBuffer { sample_rate: sr as u32, channels: vec![audio] },
+            None, soundcraft_audio_io::FileFormat::Wav);
+        let t = session.add_track(TrackKind::Audio, ChannelFormat::Mono, Some("Drums"));
+        let clip = session.new_clip_id();
+        crate::edit::place_clip(session, t, Clip::audio(clip, "Drums", src, 0, 0, (sr * 2) as i64));
+
+        let result = e.execute("audio.extract_drums", &json!({"clip": clip.0})).unwrap();
+        let dest = TrackId(result["track"].as_u64().unwrap());
+        let inst = e.session().track(dest).unwrap();
+        assert_eq!(inst.kind, TrackKind::Instrument);
+        assert_eq!(inst.instrument.as_ref().map(|x| x.plugin.as_str()), Some("drum_synth"));
+        let ClipContent::Midi { sequence } = &inst.clips()[0].content else {
+            panic!("expected MIDI");
+        };
+        assert!(sequence.notes.len() >= 2, "expected two onset notes");
+        let min = sequence.notes.iter().map(|n| n.velocity).min().unwrap();
+        let max = sequence.notes.iter().map(|n| n.velocity).max().unwrap();
+        assert!(max > min, "the loud hit must have greater velocity");
+        assert!(e.session().track(t).unwrap().clips()[0].bend_markers.len() >= 2);
+    }
+
 }
