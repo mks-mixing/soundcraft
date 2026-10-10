@@ -1,0 +1,28 @@
+name: Windows desktop regression
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "apps/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/windows-regression.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-desktop:
+    runs-on: windows-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check desktop and VST3 host
+        run: cargo check -p soundcraft -p soundcraft-vst3-host
+      - name: Test playback engine and track commands
+        run: cargo test -p soundcraft-playback -p soundcraft-engine --lib

@@ -247,6 +247,9 @@ fn main() -> eframe::Result {
             if let Some(ui) = load_prefs() {
                 app.ui = ui;
             }
+            if app.player.as_ref().is_some_and(|p| p.silent) {
+                app.ui.status = "No audio output device could start. Check Windows Sound output and %APPDATA%\\SoundCraft\\logs\\soundcraft.log".into();
+            }
             if let Some(port) = control_port {
                 let rx = control_server::start(port, cc.egui_ctx.clone());
                 app = app.with_control(rx);
