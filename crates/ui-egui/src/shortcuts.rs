@@ -137,6 +137,10 @@ fn fixed(app: &mut SoundApp, key: Key, m: Modifiers, mac: bool) -> bool {
             let _ = app.run("edit.nudge", json!({"direction": dir}));
             true
         }
+        Key::B if plain => {
+            let _ = app.run("window.browser", json!({}));
+            true
+        }
         Key::Tab if plain => {
             let _ = app.run("window.toggle_mix_edit", json!({}));
             true
