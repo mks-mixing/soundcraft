@@ -81,6 +81,10 @@ pub struct Clip {
     /// Clip gain envelope breakpoints: (offset from clip start, dB). Empty = flat `gain_db`.
     #[serde(default)]
     pub gain_env: Vec<(Samples, f32)>,
+    /// Detected onset/bend markers, in samples relative to this clip's start. These are
+    /// analysis markers only; moving them does not yet time-stretch audio.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bend_markers: Vec<Samples>,
     #[serde(default)]
     pub fade_in: Fade,
     #[serde(default)]
@@ -121,6 +125,7 @@ impl Clip {
             content: ClipContent::Audio { source, offset },
             gain_db: 0.0,
             gain_env: Vec::new(),
+            bend_markers: Vec::new(),
             fade_in: Fade::default(),
             fade_out: Fade::default(),
             muted: false,
