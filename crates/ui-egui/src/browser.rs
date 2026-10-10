@@ -48,22 +48,35 @@ fn label(ui: &mut Ui, p: &PluginEntry, selected: bool) -> egui::Response {
         .selected(selected).sense(Sense::click_and_drag()))
 }
 
+fn plugin_row(ui: &mut Ui, p: &PluginEntry, favorites: &mut Vec<String>) -> bool {
+    let favorite = favorites.contains(&p.id);
+    let resp = label(ui, p, favorite);
+    resp.dnd_set_drag_payload(PluginDrag { id: p.id.clone(), instrument: p.instrument });
+    resp.context_menu(|ui| {
+        if ui.button(if favorite { "Remove from Favorites" } else { "Add to Favorites" }).clicked() {
+            if favorite { favorites.retain(|id| id != &p.id); }
+            else { favorites.push(p.id.clone()); }
+            ui.close();
+        }
+    });
+    resp.clicked()
+}
+
 /// A common searchable list, also used in the small insert and instrument pickers.
 /// The caller owns search/sort/favorite state; this function only reports which plug-in was clicked.
-pub fn plugin_list(ui: &mut Ui, items: &[PluginEntry], query: &str, sort: &str, favorites: &[String]) -> Option<String> {
+pub fn plugin_list(ui: &mut Ui, items: &[PluginEntry], query: &str, sort: &str, favorites: &mut Vec<String>) -> Option<String> {
     let needle = query.trim().to_lowercase();
     let matches: Vec<&PluginEntry> = items.iter().filter(|p| {
-        needle.is_empty() || p.name.to_lowercase().contains(&needle)
+        (sort != "Favorites" || favorites.contains(&p.id))
+            && (needle.is_empty() || p.name.to_lowercase().contains(&needle)
             || p.vendor.to_lowercase().contains(&needle)
             || p.category.to_lowercase().contains(&needle)
-            || p.format.to_lowercase().contains(&needle)
+            || p.format.to_lowercase().contains(&needle))
     }).collect();
     let mut picked = None;
-    if sort == "Flat" {
+    if sort == "Flat" || sort == "Favorites" {
         for p in matches {
-            let resp = label(ui, p, favorites.contains(&p.id));
-            resp.dnd_set_drag_payload(PluginDrag { id: p.id.clone(), instrument: p.instrument });
-            if resp.clicked() { picked = Some(p.id.clone()); }
+            if plugin_row(ui, p, favorites) { picked = Some(p.id.clone()); }
         }
     } else {
         let mut groups: BTreeMap<String, Vec<&PluginEntry>> = BTreeMap::new();
@@ -80,9 +93,7 @@ pub fn plugin_list(ui: &mut Ui, items: &[PluginEntry], query: &str, sort: &str, 
                 .id_salt(("browser_group", sort, &group))
                 .show(ui, |ui| {
                     for p in plugins {
-                        let resp = label(ui, p, favorites.contains(&p.id));
-                        resp.dnd_set_drag_payload(PluginDrag { id: p.id.clone(), instrument: p.instrument });
-                        if resp.clicked() { picked = Some(p.id.clone()); }
+                        if plugin_row(ui, p, favorites) { picked = Some(p.id.clone()); }
                     }
                 });
         }
@@ -96,8 +107,9 @@ pub fn picker(ui: &mut Ui, instrument: bool) -> Option<String> {
     ui.add(egui::TextEdit::singleline(&mut query).hint_text("Search name, vendor, category…"));
     ui.ctx().data_mut(|d| d.insert_temp(id, query.clone()));
     let entries = entries(instrument);
+    let mut favorites = Vec::new();
     egui::ScrollArea::vertical().id_salt(("picker_list", instrument)).max_height(340.0).show(ui, |ui| {
-        plugin_list(ui, &entries, &query, "Folder", &[])
+        plugin_list(ui, &entries, &query, "Folder", &mut favorites)
     }).inner
 }
 
@@ -107,15 +119,28 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
         if ui.small_button("×").clicked() { app.ui.show_browser = false; }
     });
     ui.horizontal(|ui| {
-        ui.selectable_value(&mut app.ui.browser_instruments, false, "Effects");
-        ui.selectable_value(&mut app.ui.browser_instruments, true, "Instruments");
+        if ui.selectable_label(!app.ui.browser_instruments && !app.ui.browser_clips, "Effects").clicked() {
+            app.ui.browser_instruments = false;
+            app.ui.browser_clips = false;
+        }
+        if ui.selectable_label(app.ui.browser_instruments && !app.ui.browser_clips, "Instruments").clicked() {
+            app.ui.browser_instruments = true;
+            app.ui.browser_clips = false;
+        }
+        if ui.selectable_label(app.ui.browser_clips, "Clips").clicked() {
+            app.ui.browser_clips = true;
+        }
     });
+    if app.ui.browser_clips {
+        crate::panels::clip_list(app, ui);
+        return;
+    }
     ui.add(egui::TextEdit::singleline(&mut app.ui.browser_search)
         .hint_text("Search plug-ins, vendors, categories…").desired_width(f32::INFINITY));
     egui::ComboBox::from_id_salt("browser_sort")
         .selected_text(&app.ui.browser_sort)
         .show_ui(ui, |ui| {
-            for s in ["Flat", "Folder", "Vendor", "Type"] {
+            for s in ["Flat", "Folder", "Vendor", "Type", "Favorites"] {
                 ui.selectable_value(&mut app.ui.browser_sort, s.to_string(), s);
             }
         });
@@ -123,7 +148,7 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
     ui.label(format!("{} plug-ins · drag onto track or insert", entries.len()));
     let picked = egui::ScrollArea::vertical().id_salt("plugin_browser_list")
         .auto_shrink([false, false]).show(ui, |ui| {
-            plugin_list(ui, &entries, &app.ui.browser_search, &app.ui.browser_sort, &app.ui.browser_favorites)
+            plugin_list(ui, &entries, &app.ui.browser_search, &app.ui.browser_sort, &mut app.ui.browser_favorites)
         }).inner;
     if let Some(id) = picked {
         let selected = app.engine.session().edit.selected_tracks.first().copied();
