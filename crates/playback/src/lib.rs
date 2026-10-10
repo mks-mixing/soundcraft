@@ -391,31 +391,66 @@ impl Player {
         let want = session.sample_rate.hz();
         let want_ch = u16::try_from(main_channels(&session)).unwrap_or(2);
         match open_device(want, want_ch) {
-            Ok((device, config, name)) => {
+            Ok((device, config, format, name)) => {
                 let rate = config.sample_rate.0;
                 let channels = usize::from(config.channels);
                 let mut state = AudioState::new(rx, Arc::clone(&shared), session, f64::from(rate), gtx);
-                // cpal may call this on the audio thread (on ALSA in a loop while the device
-                // stays broken): marked, so the logger hands the record off instead of writing it.
-                let err_fn = |e: cpal::StreamError| {
-                    mark_audio_thread();
-                    log::warn!("audio stream error: {e}");
-                };
+                // Prefer the Windows shared-mode format and rate negotiated by WASAPI.
+                // A device that exposes only integer PCM must not silently disable playback.
                 use cpal::traits::{DeviceTrait, StreamTrait};
-                match device.build_output_stream(
-                    &config,
-                    move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                        mark_audio_thread();
-                        state.fill(data, channels);
-                    },
-                    err_fn,
-                    None,
-                ) {
+                let stream: Result<cpal::Stream, String> = match format {
+                    cpal::SampleFormat::F32 => device.build_output_stream(
+                        &config,
+                        move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                            mark_audio_thread();
+                            state.fill(data, channels);
+                        },
+                        stream_error, None,
+                    ).map_err(|e| e.to_string()),
+                    cpal::SampleFormat::I16 => {
+                        let mut buf = Vec::<f32>::new();
+                        device.build_output_stream(
+                            &config,
+                            move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
+                                mark_audio_thread();
+                                buf.resize(data.len(), 0.0);
+                                state.fill(&mut buf, channels);
+                                for (sample, out) in buf.iter().zip(data.iter_mut()) {
+                                    *out = (sample.clamp(-1.0, 1.0) * 32767.0) as i16;
+                                }
+                            },
+                            stream_error, None,
+                        ).map_err(|e| e.to_string())
+                    }
+                    cpal::SampleFormat::U16 => {
+                        let mut buf = Vec::<f32>::new();
+                        device.build_output_stream(
+                            &config,
+                            move |data: &mut [u16], _: &cpal::OutputCallbackInfo| {
+                                mark_audio_thread();
+                                buf.resize(data.len(), 0.0);
+                                state.fill(&mut buf, channels);
+                                for (sample, out) in buf.iter().zip(data.iter_mut()) {
+                                    *out = ((sample.clamp(-1.0, 1.0) + 1.0) * 32767.5) as u16;
+                                }
+                            },
+                            stream_error, None,
+                        ).map_err(|e| e.to_string())
+                    }
+                    other => Err(format!("unsupported output sample format {other:?}")),
+                };
+                match stream {
                     Ok(stream) => {
                         if let Err(e) = stream.play() {
-                            log::warn!("audio stream failed to start: {e}");
+                            log::warn!("audio stream failed to start: {e}; using silent clock");
+                            let (tx2, rx2) = channel();
+                            let (gtx2, grx2) = channel();
+                            let mut side = side;
+                            side.get_mut().unwrap_or_else(PoisonError::into_inner).garbage = grx2;
+                            drop(stream);
+                            return Player::silent_clock(shared, tx2, rx2, want, side, gtx2);
                         }
-                        log::info!("audio device: {name} @ {rate} Hz, {channels} ch");
+                        log::info!("audio device: {name} @ {rate} Hz, {channels} ch, {format:?}");
                         Player {
                             shared,
                             tx,
@@ -428,7 +463,7 @@ impl Player {
                         }
                     }
                     Err(e) => {
-                        log::warn!("cannot open audio stream: {e}; using a silent clock");
+                        log::warn!("cannot open audio stream ({format:?}): {e}; using a silent clock");
                         let (tx2, rx2) = channel();
                         let (gtx2, grx2) = channel();
                         // The state (and its receivers) moved into the failed closure; rebuild.
@@ -689,15 +724,28 @@ fn fold_gains(s: &Session) -> [(f32, f32); MAX_CHANNELS] {
     g
 }
 
-/// Open the default output device: f32 at the session rate if possible, with as many channels as
-/// it offers up to `want_ch` (at least stereo when available).
-fn open_device(want_rate: u32, want_ch: u16) -> Result<(cpal::Device, cpal::StreamConfig, String), String> {
+/// Stream errors come from the system audio thread.  Log via its lock-free path.
+fn stream_error(e: cpal::StreamError) {
+    mark_audio_thread();
+    log::warn!("audio stream error: {e}");
+}
+
+/// Negotiate a supported output format, preferring the Windows shared-mode default.
+/// WASAPI can refuse a session-rate stream even when that rate appears supported;
+/// the mixer already resamples between its session rate and the device rate.
+fn open_device(want_rate: u32, want_ch: u16) -> Result<(cpal::Device, cpal::StreamConfig, cpal::SampleFormat, String), String> {
     use cpal::traits::{DeviceTrait, HostTrait};
     let host = cpal::default_host();
     let device = host.default_output_device().ok_or_else(|| "no default output device".to_string())?;
     #[allow(deprecated)]
     let name = device.name().unwrap_or_else(|_| "Audio device".into());
-    // Prefer an f32 config at the session rate; else the device default (we resample).
+    let default = device.default_output_config().map_err(|e| e.to_string())?;
+    let supported = |f: cpal::SampleFormat| matches!(f, cpal::SampleFormat::F32 | cpal::SampleFormat::I16 | cpal::SampleFormat::U16);
+    // Windows needs the shared-mode sample rate and channel layout for reliable
+    // WASAPI startup.  On other platforms the preferred f32 session rate is fine.
+    if cfg!(windows) && supported(default.sample_format()) {
+        return Ok((device, default.config(), default.sample_format(), name));
+    }
     let want_ch = want_ch.max(2);
     let mut chosen: Option<cpal::StreamConfig> = None;
     if let Ok(configs) = device.supported_output_configs() {
@@ -705,7 +753,7 @@ fn open_device(want_rate: u32, want_ch: u16) -> Result<(cpal::Device, cpal::Stre
             if c.sample_format() == cpal::SampleFormat::F32
                 && c.min_sample_rate().0 <= want_rate
                 && c.max_sample_rate().0 >= want_rate
-                && c.channels() >= 2
+                && c.channels() >= 1
                 && c.channels() <= want_ch
                 && chosen.as_ref().is_none_or(|x| c.channels() > x.channels)
             {
@@ -713,17 +761,24 @@ fn open_device(want_rate: u32, want_ch: u16) -> Result<(cpal::Device, cpal::Stre
             }
         }
     }
-    let config = match chosen {
-        Some(c) => c,
-        None => {
-            let d = device.default_output_config().map_err(|e| e.to_string())?;
-            if d.sample_format() != cpal::SampleFormat::F32 {
-                return Err(format!("unsupported device sample format {:?}", d.sample_format()));
+    if let Some(config) = chosen {
+        return Ok((device, config, cpal::SampleFormat::F32, name));
+    }
+    if supported(default.sample_format()) {
+        return Ok((device, default.config(), default.sample_format(), name));
+    }
+    // A less-common default (such as 32-bit integer) may still offer f32/I16/U16
+    // at a standard rate. Prefer that over falling back to a silent clock.
+    if let Ok(configs) = device.supported_output_configs() {
+        for c in configs {
+            if supported(c.sample_format()) {
+                let rate = want_rate.clamp(c.min_sample_rate().0, c.max_sample_rate().0);
+                let format = c.sample_format();
+                return Ok((device, c.with_sample_rate(cpal::SampleRate(rate)).config(), format, name));
             }
-            d.config()
         }
-    };
-    Ok((device, config, name))
+    }
+    Err(format!("unsupported default output sample format {:?}", default.sample_format()))
 }
 
 #[cfg(test)]
