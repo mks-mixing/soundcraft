@@ -25,11 +25,11 @@ pub fn header_width(s: &Session) -> f32 {
 }
 pub const RULER_H: f32 = 17.0;
 
-/// Geometry of the last frame, for hit testing and agents (`ui.inspect`).
-#[derive(Debug, Clone, Default, serde::Serialize)]
 #[derive(Debug, Clone, Copy)]
 struct TrackOrderDrag(TrackId);
 
+/// Geometry of the last frame, for hit testing and agents (`ui.inspect`).
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct EditLayout {
     pub timeline: [f32; 4],
     pub rows: Vec<(u64, [f32; 4])>,
