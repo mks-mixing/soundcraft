@@ -91,11 +91,27 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
                     && let Some((target, _)) = drop_targets.iter().find(|(_, rect)| rect.contains(p))
                     && let Some(payload) = egui::DragAndDrop::take_payload::<TrackDrag>(ui.ctx())
                 {
-                    let folder = app.engine.session().track(*target).and_then(|t| {
-                        if t.kind == TrackKind::Folder { Some(t.id) } else { t.folder }
-                    });
-                    if let Some(folder) = folder.filter(|fid| *fid != payload.0) {
-                        let _ = app.run("track.folder_assign", json!({"tracks": [payload.0.0], "folder": folder.0}));
+                    // Dropping on a folder routes into it; on any other strip
+                    // it rearranges the channel order in both Mix and Edit.
+                    if *target != payload.0 {
+                        let session = app.engine.session();
+                        let folder = session.track(*target)
+                            .filter(|t| t.kind == TrackKind::Folder).map(|t| t.id);
+                        if let Some(folder) = folder {
+                            let _ = app.run("track.folder_assign", json!({"tracks": [payload.0.0], "folder": folder.0}));
+                        } else if let (Some(from), Some(mut to)) =
+                            (session.track_index(payload.0), session.track_index(*target))
+                        {
+                            if let Some((_, rect)) = drop_targets.iter().find(|(tid, _)| tid == target)
+                                && p.x > rect.center().x
+                            {
+                                to += 1;
+                            }
+                            if to > from { to -= 1; }
+                            if to != from {
+                                let _ = app.run("track.move", json!({"track": payload.0.0, "to": to}));
+                            }
+                        }
                     }
                 }
             });
