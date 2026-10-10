@@ -1271,6 +1271,22 @@ fn draw_clip(app: &SoundApp, painter: &egui::Painter, s: &Session, track: &Track
             .collect();
         painter.add(Shape::line(pts, Stroke::new(1.2, fade_col)));
     }
+    // Transient/bend markers detected on this audio clip (analysis only: no time stretching).
+    if clip.is_audio() {
+        let bend_color = Color32::from_rgb(250, 190, 80);
+        for &offset in &clip.bend_markers {
+            if offset >= 0 && offset < clip.length {
+                let x = x_of(s, tl, clip.start.saturating_add(offset));
+                if x >= r.min.x && x <= r.max.x && x >= lane.min.x && x <= lane.max.x {
+                    painter.line_segment(
+                        [pos2(x, r.min.y + name_h), pos2(x, r.max.y)],
+                        Stroke::new(1.0, bend_color),
+                    );
+                    painter.circle_filled(pos2(x, r.min.y + name_h + 2.0), 2.0, bend_color);
+                }
+            }
+        }
+    }
     // Optional clip overlays (View › Clip).
     let ov = Color32::from_rgb(16, 16, 16);
     if s.edit.flag("view.clip.rating") && clip.rating > 0 && name_h > 0.0 {
@@ -1446,6 +1462,9 @@ fn lane_interaction(app: &mut SoundApp, ui: &mut Ui, track: &Track, lane: Rect, 
     }
     if resp.dnd_hover_payload::<crate::DragSource>().is_some() {
         ui.painter().rect_stroke(lane, 0.0, Stroke::new(2.0, Tokens::current().accent), StrokeKind::Inside);
+    }
+    if let Some(plugin) = resp.dnd_release_payload::<crate::browser::PluginDrag>() {
+        crate::browser::insert_on_track(app, track.id, &plugin, None);
     }
     let s = app.engine.session().clone();
     let tool = s.edit.tool;
@@ -1639,6 +1658,19 @@ fn lane_interaction(app: &mut SoundApp, ui: &mut Ui, track: &Track, lane: Rect, 
         let g = app.gesture.take();
         match g {
             Some(Gesture::MoveClips { clips, delta, from_track, to_track, .. }) => {
+                // Drag an audio clip onto an instrument/MIDI lane to extract its drum timing
+                // and velocities. Preserve the original audio event.
+                if to_track != from_track
+                    && app.engine.session().track(from_track).is_some_and(|t| t.kind == TrackKind::Audio)
+                    && app.engine.session().track(to_track).is_some_and(|t| t.kind.is_midi())
+                {
+                    if let [clip] = clips.as_slice() {
+                        let _ = app.run("audio.extract_drums", json!({"clip": clip.0, "to_track": to_track.0}));
+                    } else {
+                        app.ui.status = "Drag one audio clip at a time to extract MIDI".to_string();
+                    }
+                    return;
+                }
                 let ids: Vec<u64> = clips.iter().map(|c| c.0).collect();
                 let mut params = json!({"clips": ids, "by": delta});
                 if to_track != from_track {
@@ -1757,6 +1789,16 @@ fn clip_context_menu(app: &mut SoundApp, ui: &mut Ui, clip: Option<ClipId>) {
         }
         return;
     };
+    let is_audio = app.engine.session().find_clip(c).is_some_and(|(_, clip)| clip.is_audio());
+    if is_audio {
+        if ui.button("Detect Bend Markers").clicked() {
+            let _ = app.run("audio.detect_bends", json!({"clip": c.0}));
+        }
+        if ui.button("Extract Drums to New Instrument Track").clicked() {
+            let _ = app.run("audio.extract_drums", json!({"clip": c.0}));
+        }
+        ui.separator();
+    }
     let ids = json!([c.0]);
     for (label, cmd) in [
         ("Mute/Unmute", "edit.mute_clips"),
