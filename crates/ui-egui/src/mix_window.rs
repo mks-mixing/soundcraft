@@ -503,6 +503,23 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
     ui.painter().line_segment([pos2(r.max.x, r.min.y), pos2(r.max.x, r.max.y)], Stroke::new(1.0, t.border));
 }
 
+/// Prefer a VST3 plugin's own editor on Windows/macOS. The generic parameter
+/// window remains available for built-ins or if the native view cannot open.
+fn open_plugin_slot(app: &mut SoundApp, track: TrackId, slot: usize, plugin: &str) {
+    if plugin.starts_with("vst3:")
+        && let Some(player) = &app.player
+        && player.has_editor(track, slot)
+    {
+        match player.open_editor(track, slot) {
+            Ok(()) => return,
+            Err(error) => app.ui.status = format!("Native VST3 editor: {error}. Showing parameters instead."),
+        }
+    }
+    if !app.ui.plugin_windows.contains(&(track, slot)) {
+        app.ui.plugin_windows.push((track, slot));
+    }
+}
+
 /// An instrument track's INSTRUMENT row: click opens a hosted instrument's plugin window,
 /// right-click (or click, when none is set) picks another instrument.
 fn instrument_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, r: Rect) {
@@ -521,8 +538,8 @@ fn instrument_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, r: Rect) {
     );
     ui.painter().with_clip_rect(r).text(r.center(), Align2::CENTER_CENTER, info.map_or("no instrument", |p| p.short_name), regular(10.5), t.text);
     let hosted = ins.is_some_and(|i| soundcraft_mix::is_third_party(&i.plugin));
-    if resp.clicked() && hosted && !app.ui.plugin_windows.contains(&(id, slot)) {
-        app.ui.plugin_windows.push((id, slot));
+    if resp.clicked() && hosted {
+        if let Some(ins) = ins { open_plugin_slot(app, id, slot, &ins.plugin); }
     }
     let menu_resp = if hosted { resp.clone().on_hover_text("Click: open instrument · right-click: change") } else { resp.clone() };
     let popup = if hosted { egui::Popup::context_menu(&menu_resp) } else { egui::Popup::menu(&menu_resp) };
@@ -561,8 +578,8 @@ fn insert_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: usize, r: R
     } else {
         ui.painter().with_clip_rect(r).text(r.center(), Align2::CENTER_CENTER, label, regular(10.5), t.text);
     }
-    if resp.clicked() && ins.is_some() && !app.ui.plugin_windows.contains(&(id, slot)) {
-        app.ui.plugin_windows.push((id, slot));
+    if resp.clicked() {
+        if let Some(ins) = &ins { open_plugin_slot(app, id, slot, &ins.plugin); }
     }
     let menu_resp = if ins.is_none() { resp.clone() } else { resp.clone().on_hover_text("Click: open · drag: copy to another track · right-click: change") };
     let popup = if ins.is_none() { egui::Popup::menu(&menu_resp) } else { egui::Popup::context_menu(&menu_resp) };
