@@ -51,7 +51,7 @@ fn source_and_range(e: &Engine, p: &Value, cmd: &str) -> Result<(TrackId, Range)
     let s = e.session();
     if let Some(cid) = p.get("clip").and_then(Value::as_u64) {
         let (t, c) = s.find_clip(ClipId(cid)).ok_or_else(|| bad(cmd, "audio clip not found"))?;
-        if !matches!(c.content, ClipContent::Audio { .. }) {
+        if !matches!(&c.content, ClipContent::Audio { .. }) {
             return Err(bad(cmd, "source must be an audio clip"));
         }
         return Ok((t, c.range()));
@@ -89,7 +89,7 @@ fn annotate_bends(s: &mut Session, track: TrackId, hits: &[(i64, u8)]) {
     if let Some(tr) = s.track_mut(track) {
         if let Some(pl) = tr.playlist_mut() {
             for clip in &mut pl.clips {
-                if matches!(clip.content, ClipContent::Audio { .. }) {
+                if matches!(&clip.content, ClipContent::Audio { .. }) {
                     clip.bend_markers = hits.iter().filter(|(at, _)| *at >= clip.start && *at < clip.end())
                         .map(|(at, _)| at.saturating_sub(clip.start)).collect();
                 }
