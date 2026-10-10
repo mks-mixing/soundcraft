@@ -27,6 +27,9 @@ pub const RULER_H: f32 = 17.0;
 
 /// Geometry of the last frame, for hit testing and agents (`ui.inspect`).
 #[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Copy)]
+struct TrackOrderDrag(TrackId);
+
 pub struct EditLayout {
     pub timeline: [f32; 4],
     pub rows: Vec<(u64, [f32; 4])>,
@@ -231,6 +234,33 @@ fn main_area(app: &mut SoundApp, ui: &mut Ui) {
         app.edit_layout.rows.push((id.0, [row.min.x, row.min.y, row.max.x, row.max.y]));
         y += h + 1.0;
         content_h += h + 1.0;
+    }
+    // Resolve track drops here, after all rows have been drawn.  Receiving the
+    // release on the source header is unreliable once the cursor is over a
+    // different row/child egui UI.
+    if ui.input(|i| i.pointer.any_released())
+        && let Some(source) = egui::DragAndDrop::take_payload::<TrackOrderDrag>(ui.ctx())
+        && let Some(pos) = ui.ctx().pointer_latest_pos()
+    {
+        let rows = app.edit_layout.rows.clone();
+        let index = rows.iter().position(|(_, r)| pos.y < (r[1] + r[3]) * 0.5).unwrap_or(rows.len());
+        let session = app.engine.session();
+        let target = rows.get(index).map(|(tid, _)| TrackId(*tid));
+        let to = target.and_then(|tid| session.track_index(tid)).unwrap_or(session.tracks.len());
+        let from = session.track_index(source.0);
+        let join = rows.get(index)
+            .filter(|(_, r)| pos.y >= r[1] && pos.y <= r[3])
+            .and_then(|(tid, _)| session.track(TrackId(*tid)))
+            .and_then(|tr| if tr.kind == TrackKind::Folder { Some(tr.id) } else { None })
+            .filter(|folder| *folder != source.0);
+        if let Some(folder) = join {
+            let _ = app.run("track.folder_assign", json!({"tracks": [source.0.0], "folder": folder.0}));
+        } else if let Some(from) = from {
+            let to = if to > from { to - 1 } else { to };
+            if to != from {
+                let _ = app.run("track.move", json!({"track": source.0.0, "to": to}));
+            }
+        }
     }
     app.edit_layout.content_h = content_h;
     // Empty area click clears track selection.
@@ -747,6 +777,7 @@ fn track_header(app: &mut SoundApp, ui: &mut Ui, track: &Track, head: Rect, sele
         let _ = app.run("edit.select", json!({"tracks": ids}));
     }
     bg.context_menu(|ui| track_context_menu(app, ui, id));
+    bg.dnd_set_drag_payload(TrackOrderDrag(id));
     // Name field.
     let name_r = Rect::from_min_size(pos2(x0, head.min.y + 4.0), vec2(150.0, 17.0));
     ui.painter().rect(
@@ -764,6 +795,7 @@ fn track_header(app: &mut SoundApp, ui: &mut Ui, track: &Track, head: Rect, sele
     };
     ui.painter().with_clip_rect(name_r).text(name_r.center(), Align2::CENTER_CENTER, &shown_name, bold(12.0), t.text_dark);
     let nresp = ui.interact(name_r, ui.id().with(("name", id.0)), Sense::click_and_drag());
+    nresp.dnd_set_drag_payload(TrackOrderDrag(id));
     if nresp.double_clicked() {
         app.dialogs.open_rename_track(id, &track.name);
     } else if nresp.clicked() {
@@ -785,28 +817,6 @@ fn track_header(app: &mut SoundApp, ui: &mut Ui, track: &Track, head: Rect, sele
         ui.ctx()
             .layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("reorder")))
             .line_segment([pos2(head.min.x, line_y), pos2(head.max.x + 600.0, line_y)], Stroke::new(3.0, Tokens::current().accent));
-    }
-    if nresp.drag_stopped()
-        && let Some(p) = ui.ctx().pointer_latest_pos()
-    {
-        let rows = app.edit_layout.rows.clone();
-        let target_row = rows.iter().position(|(_, r)| p.y < (r[1] + r[3]) * 0.5).unwrap_or(rows.len());
-        // Convert the visible-row index to a session index.
-        let s = app.engine.session();
-        let to = rows.get(target_row).and_then(|(tid, _)| s.track_index(TrackId(*tid))).unwrap_or(s.tracks.len());
-        let from = s.track_index(id).unwrap_or(0);
-        // Dropping on a folder, or between its expanded children, joins its audio bus.
-        let folder = rows.get(target_row).and_then(|(tid, _)| s.track(TrackId(*tid))).and_then(|t| {
-            if t.kind == TrackKind::Folder { Some(t.id) } else { t.folder }
-        });
-        if let Some(folder) = folder.filter(|folder| *folder != id) {
-            let _ = app.run("track.folder_assign", json!({"tracks": [id.0], "folder": folder.0}));
-        } else {
-            let to = if to > from { to - 1 } else { to };
-            if to != from {
-                let _ = app.run("track.move", json!({"track": id.0, "to": to}));
-            }
-        }
     }
     // Playlist selector arrow.
     let pl_r = Rect::from_min_size(pos2(name_r.max.x + 3.0, name_r.min.y), vec2(16.0, 17.0));
