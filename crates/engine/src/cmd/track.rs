@@ -745,4 +745,18 @@ mod tests {
         assert!(e.execute("mix.volume", &json!({"track": fid, "db": -9.0})).is_ok());
         assert_eq!(e.session().track(soundcraft_model::TrackId(fid)).unwrap().mixer.volume_db, -9.0);
     }
+    #[test]
+    fn moving_a_track_reorders_without_changing_its_audio_or_identity() {
+        let mut e = Engine::default();
+        let s = e.session_mut();
+        let a = s.add_track(TrackKind::Audio, ChannelFormat::Stereo, Some("A"));
+        let b = s.add_track(TrackKind::Audio, ChannelFormat::Stereo, Some("B"));
+        let c = s.add_track(TrackKind::Audio, ChannelFormat::Stereo, Some("C"));
+        assert_eq!(s.tracks.iter().map(|t| t.id).collect::<Vec<_>>(), vec![a, b, c]);
+        e.execute("track.move", &json!({"track": a.0, "to": 2})).unwrap();
+        assert_eq!(e.session().tracks.iter().map(|t| t.id).collect::<Vec<_>>(), vec![b, c, a]);
+        e.execute("track.move", &json!({"track": a.0, "to": 0})).unwrap();
+        assert_eq!(e.session().tracks.iter().map(|t| t.id).collect::<Vec<_>>(), vec![a, b, c]);
+    }
+
 }
